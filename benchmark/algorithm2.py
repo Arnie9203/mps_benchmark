@@ -222,6 +222,17 @@ def check_invariance(Aks: List[np.ndarray], Q: np.ndarray, tol: float = 1e-8) ->
 
 
 @dataclass
+class Algorithm2Timing:
+    decomp: float
+    cert: float
+    logic: float
+
+    @property
+    def total(self) -> float:
+        return self.decomp + self.cert + self.logic
+
+
+@dataclass
 class Algorithm2Info:
     num_blocks: int
     block_dims: List[int]
@@ -230,6 +241,7 @@ class Algorithm2Info:
     kappa: int
     rho2_global: float
     nonperiph_count: int
+    timing: Algorithm2Timing | None = None
 
 
 @dataclass
@@ -246,8 +258,16 @@ def algorithm2_from_Aks(
     Aks: List[np.ndarray],
     interval_I: Tuple[float, float],
     tol_periph: float = 1e-10,
+    *,
+    with_timing: bool = False,
 ) -> Algorithm2Output:
     a, b = interval_I
+    t_decomp = 0.0
+    t_cert = 0.0
+    t_logic = 0.0
+    if with_timing:
+        import time
+        t0 = time.perf_counter()
     blocks_Q = decompose_irreducible_by_support(Aks)
     blocks_kraus = [restrict_kraus(Aks, Qm) for Qm in blocks_Q]
 
@@ -255,7 +275,12 @@ def algorithm2_from_Aks(
         ok, err = check_invariance(Aks, Qm)
         if not ok:
             raise RuntimeError(f"block {idx} not invariant, err={err}")
+    if with_timing:
+        t1 = time.perf_counter()
+        t_decomp = t1 - t0
 
+    if with_timing:
+        t2 = time.perf_counter()
     Ms, eigs_list, rms, pms = [], [], [], []
     for kraus_m in blocks_kraus:
         M = superop_matrix(kraus_m)
@@ -279,6 +304,9 @@ def algorithm2_from_Aks(
         for lam in eigvals:
             if abs(abs(lam) - rm) > tol_periph:
                 nonperiph_mods.append(abs(lam))
+    if with_timing:
+        t3 = time.perf_counter()
+        t_cert = t3 - t2
 
     def Gamma(N: int) -> float:
         s = 0 + 0j
@@ -359,6 +387,10 @@ def algorithm2_from_Aks(
 
         Omega_minus[i] = {"Ni": Ni, "exceptions": Lambda_i}
 
+    if with_timing:
+        t4 = time.perf_counter()
+        t_logic = t4 - t3
+
     info = Algorithm2Info(
         num_blocks=len(blocks_Q),
         block_dims=[Q.shape[1] for Q in blocks_Q],
@@ -367,6 +399,9 @@ def algorithm2_from_Aks(
         kappa=kappa,
         rho2_global=float(max(nonperiph_mods)) if nonperiph_mods else 0.0,
         nonperiph_count=len(nonperiph_mods),
+        timing=Algorithm2Timing(decomp=t_decomp, cert=t_cert, logic=t_logic)
+        if with_timing
+        else None,
     )
 
     return Algorithm2Output(

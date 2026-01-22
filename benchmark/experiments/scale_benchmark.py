@@ -55,6 +55,39 @@ def _tail_eventually(truths: List[bool], tail_window: int) -> Tuple[set[int], se
     return omega_plus, omega_minus
 
 
+def _alg2_predicate(
+    omega_plus: set[int],
+    omega_minus: dict[int, dict[str, object]],
+    kappa: int,
+    N: int,
+) -> bool:
+    i = N % kappa
+    if i not in omega_plus:
+        return False
+    info = omega_minus.get(i)
+    if info is None:
+        return False
+    Ni = info.get("Ni")
+    exceptions = set(info.get("exceptions", []))
+    if Ni is None:
+        return False
+    if N < Ni:
+        return N in exceptions
+    return True
+
+
+def _time_and_memory(fn):
+    import tracemalloc
+
+    tracemalloc.start()
+    start = time.perf_counter()
+    result = fn()
+    elapsed = time.perf_counter() - start
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    return result, elapsed, peak / (1024 * 1024)
+
+
 def run_scale_benchmark(config: BenchmarkConfig) -> Dict[Tuple[int, float, int, int], BenchmarkResult]:
     results = {}
     for D in config.D_values:
@@ -72,38 +105,63 @@ def run_scale_benchmark(config: BenchmarkConfig) -> Dict[Tuple[int, float, int, 
                     sample_vals = [gamma(n) for n in range(20, 41)]
                     interval = adaptive_interval(sample_vals, width=0.05)
 
-                    start = time.perf_counter()
-                    alg2 = algorithm2_from_Aks(kraus, (interval.a, interval.b))
-                    t_alg2 = time.perf_counter() - start
+                    alg2, t_alg2, mem_alg2 = _time_and_memory(
+                        lambda: algorithm2_from_Aks(
+                            kraus, (interval.a, interval.b), with_timing=True
+                        )
+                    )
 
-                    start = time.perf_counter()
-                    brute_truth = _eval_predicate(gamma, interval, config.N_max)
+                    brute_truth, t_brute, mem_brute = _time_and_memory(
+                        lambda: _eval_predicate(gamma, interval, config.N_max)
+                    )
                     brute_plus, brute_minus = _tail_eventually(brute_truth, config.tail_window)
-                    t_brute = time.perf_counter() - start
 
-                    start = time.perf_counter()
                     schur_vals = eigvals
                     schur_gamma = lambda N: float(np.sum(schur_vals ** N).real)
-                    schur_truth = _eval_predicate(schur_gamma, interval, config.N_max)
+                    schur_truth, t_schur, mem_schur = _time_and_memory(
+                        lambda: _eval_predicate(schur_gamma, interval, config.N_max)
+                    )
                     schur_plus, schur_minus = _tail_eventually(schur_truth, config.tail_window)
-                    t_schur = time.perf_counter() - start
 
                     agree = sum(
                         1 for a, b in zip(brute_truth, schur_truth) if a == b
                     ) / config.N_max
+                    alg2_pred = [
+                        _alg2_predicate(
+                            alg2.omega_plus, alg2.omega_minus, alg2.info.kappa, n
+                        )
+                        for n in range(1, config.N_max + 1)
+                    ]
+                    alg2_agree = sum(
+                        1 for a, b in zip(brute_truth, alg2_pred) if a == b
+                    ) / config.N_max
 
                     results[(D, eps, seed, repeat)] = BenchmarkResult(
                         runtime={"alg2": t_alg2, "brute": t_brute, "schur": t_schur},
-                        memory={},
+                        memory={
+                            "alg2": mem_alg2,
+                            "brute": mem_brute,
+                            "schur": mem_schur,
+                        },
                         metrics={
                             "tightness": float(len(brute_plus.difference(brute_minus))),
-                            "agreement": float(agree),
+                            "agreement_schur": float(agree),
+                            "agreement_alg2": float(alg2_agree),
+                            "omega_plus_size": float(len(alg2.omega_plus)),
+                            "omega_minus_size": float(len(alg2.omega_minus)),
                         },
                         info={
                             "num_blocks": alg2.info.num_blocks,
                             "kappa": alg2.info.kappa,
                             "rho2": alg2.info.rho2_global,
                             "interval": (interval.a, interval.b),
+                            "timing": {
+                                "decomp": alg2.info.timing.decomp
+                                if alg2.info.timing
+                                else None,
+                                "cert": alg2.info.timing.cert if alg2.info.timing else None,
+                                "logic": alg2.info.timing.logic if alg2.info.timing else None,
+                            },
                         },
                     )
     return results
